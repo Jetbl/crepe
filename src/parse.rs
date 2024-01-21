@@ -1,5 +1,6 @@
 //! Parsing logic
 
+use proc_macro_error::abort;
 use quote::{quote, ToTokens};
 use syn::parse::{Parse, ParseStream};
 use syn::punctuated::Punctuated;
@@ -10,6 +11,7 @@ use syn::{
 
 #[derive(Clone)]
 pub struct Program {
+    pub runtime_context: Option<Relation>,
     pub relations: Vec<Relation>,
     pub rules: Vec<Rule>,
 }
@@ -18,11 +20,26 @@ impl Parse for Program {
     fn parse(input: ParseStream) -> Result<Self> {
         let mut relations: Vec<Relation> = Vec::new();
         let mut rules: Vec<Rule> = Vec::new();
+        let mut runtime_context = None;
 
         while !input.is_empty() {
             let lookahead = input.lookahead1();
             if lookahead.peek(Token![@]) || lookahead.peek(Token![struct]) {
-                relations.push(input.parse()?);
+                let relation: Relation = input.parse()?;
+                if let Some(ident) = &relation.attribute {
+                    if ident == "context" {
+                        if runtime_context.is_some() {
+                            abort!(
+                                ident.span(),
+                                "Invalid attribute @{}, expected '@input', '@output',  or 'contex'",
+                                ident
+                            )
+                        }
+                        runtime_context = Some(relation);
+                        continue;
+                    }
+                }
+                relations.push(relation);
             } else if lookahead.peek(Ident) {
                 rules.push(input.parse()?);
             } else {
@@ -30,7 +47,11 @@ impl Parse for Program {
             }
         }
 
-        Ok(Self { relations, rules })
+        Ok(Self {
+            runtime_context,
+            relations,
+            rules,
+        })
     }
 }
 

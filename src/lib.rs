@@ -290,6 +290,7 @@ type QuoteWrapper = dyn Fn(proc_macro2::TokenStream) -> proc_macro2::TokenStream
 /// Intermediate representation for Datalog compilation
 struct Context {
     has_input_lifetime: bool,
+    runtime_context: Option<Relation>,
     rels_input: HashMap<String, Relation>,
     rels_output: HashMap<String, Relation>,
     output_order: Vec<Ident>,
@@ -301,6 +302,7 @@ struct Context {
 impl Context {
     fn new(program: Program) -> Self {
         // Read in relations, ensure no duplicates
+        // let mut runtime_context = None;
         let mut rels_input = HashMap::new();
         let mut rels_output = HashMap::new();
         let mut rels_intermediate = HashMap::new();
@@ -344,7 +346,7 @@ impl Context {
                 Err(attr) => {
                     abort!(
                         attr.span(),
-                        "Invalid attribute @{}, expected '@input' or '@output'",
+                        "Invalid attribute @{}, expected '@input', '@output',  or 'contex'",
                         attr
                     )
                 }
@@ -450,6 +452,13 @@ impl Context {
             }
         }
 
+        if let Some(relation) = &program.runtime_context {
+            let num_lifetimes = relation.generics.lifetimes().count();
+            if num_lifetimes > 0 {
+                has_input_lifetime = true;
+            }
+        }
+
         // If all the relations are OK, we simply update the rules as-is.
         //
         // There's no need to do complex parsing logic yet; we can work that
@@ -457,6 +466,7 @@ impl Context {
         // context-sensitive logic.
         let rules = program.rules;
         Self {
+            runtime_context: program.runtime_context,
             has_input_lifetime,
             rels_input,
             rels_output,
@@ -479,6 +489,7 @@ impl Context {
             .values()
             .chain(self.rels_intermediate.values())
             .chain(self.rels_output.values())
+        // .chain(self.runtime_context.as_ref())
     }
 }
 
@@ -550,6 +561,7 @@ fn make_struct_decls(context: &Context) -> proc_macro2::TokenStream {
             let generics = &relation.generics;
             let semi_token = &relation.semi_token;
             let fields = &relation.fields;
+
             quote_spanned! {name.span()=>
                 #[derive(
                     ::core::marker::Copy,
@@ -562,6 +574,23 @@ fn make_struct_decls(context: &Context) -> proc_macro2::TokenStream {
                 #vis #struct_token #name #generics (#fields)#semi_token
             }
         })
+        .chain(context.runtime_context.as_ref().map(|relation| {
+            let attrs = &relation.attrs;
+            let struct_token = &relation.struct_token;
+            let vis = &relation.visibility;
+            let name = &relation.name;
+            let generics = &relation.generics;
+            let semi_token = &relation.semi_token;
+            let fields = &relation.fields;
+
+            quote_spanned! {name.span()=>
+                #[derive(
+                    ::core::default::Default,
+                )]
+                #(#attrs)*
+                #vis #struct_token #name #generics (#fields)#semi_token
+            }
+        }))
         .collect()
 }
 
@@ -578,6 +607,12 @@ fn make_runtime_decl(context: &Context) -> proc_macro2::TokenStream {
                 #lowercase_name: ::std::vec::Vec<#rel_ty>,
             }
         })
+        .chain(context.runtime_context.as_ref().map(|relation| {
+            let rel_ty = relation_type(relation, LifetimeUsage::Item);
+            quote! {
+                ctx: #rel_ty,
+            }
+        }))
         .collect();
 
     let lifetime = lifetime(context.has_input_lifetime);
@@ -594,6 +629,8 @@ fn make_runtime_impl(context: &Context) -> proc_macro2::TokenStream {
     let builders = make_extend(context);
     let run = make_run(context);
 
+    let with_ctx = make_with_ctx(context);
+
     let lifetime = lifetime(context.has_input_lifetime);
 
     quote! {
@@ -601,10 +638,25 @@ fn make_runtime_impl(context: &Context) -> proc_macro2::TokenStream {
             fn new() -> Self {
                 ::core::default::Default::default()
             }
+            #with_ctx
             #run
         }
         #builders
     }
+}
+
+fn make_with_ctx(context: &Context) -> Option<proc_macro2::TokenStream> {
+    context.runtime_context.as_ref().map(|relation| {
+        let rel_ty = relation_type(relation, LifetimeUsage::Item);
+        quote! {
+            fn with_context(ctx: #rel_ty) -> Self {
+                Self {
+                    ctx,
+                    ..::core::default::Default::default()
+                }
+            }
+        }
+    }) // have context")
 }
 
 fn make_extend(context: &Context) -> proc_macro2::TokenStream {
@@ -788,14 +840,14 @@ fn make_run(context: &Context) -> proc_macro2::TokenStream {
     quote! {
         #[allow(clippy::collapsible_if)]
         fn run_with_hasher<CrepeHasher: ::std::hash::BuildHasher + ::core::default::Default>(
-            self
+            mut self
         ) -> #output_ty_hasher {
             #initialize
             #main_loops
             #output
         }
 
-        fn run(self) -> #output_ty_default {
+        fn run(mut self) -> #output_ty_default {
             self.run_with_hasher::<::std::collections::hash_map::RandomState>()
         }
     }
@@ -1256,12 +1308,16 @@ enum LifetimeUsage {
 
 /// Returns the type of a relation, with appropriate lifetimes
 fn relation_type(rel: &Relation, usage: LifetimeUsage) -> proc_macro2::TokenStream {
-    let symbol = match rel.relation_type().unwrap() {
-        RelationType::Input | RelationType::Output => "'a",
-        RelationType::Intermediate => match usage {
-            LifetimeUsage::Item => "'a",
-            LifetimeUsage::Local => "'_",
-        },
+    let symbol = if let Ok(rel_type) = rel.relation_type() {
+        match rel_type {
+            RelationType::Input | RelationType::Output => "'a",
+            RelationType::Intermediate => match usage {
+                LifetimeUsage::Item => "'a",
+                LifetimeUsage::Local => "'_",
+            },
+        }
+    } else {
+        "'a"
     };
 
     let name = &rel.name;
