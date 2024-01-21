@@ -584,9 +584,6 @@ fn make_struct_decls(context: &Context) -> proc_macro2::TokenStream {
             let fields = &relation.fields;
 
             quote_spanned! {name.span()=>
-                #[derive(
-                    ::core::default::Default,
-                )]
                 #(#attrs)*
                 #vis #struct_token #name #generics (#fields)#semi_token
             }
@@ -618,7 +615,6 @@ fn make_runtime_decl(context: &Context) -> proc_macro2::TokenStream {
     let lifetime = lifetime(context.has_input_lifetime);
 
     quote! {
-        #[derive(::core::default::Default)]
         struct Crepe #lifetime {
             #fields
         }
@@ -629,34 +625,53 @@ fn make_runtime_impl(context: &Context) -> proc_macro2::TokenStream {
     let builders = make_extend(context);
     let run = make_run(context);
 
-    let with_ctx = make_with_ctx(context);
+    let new = make_new(context);
 
     let lifetime = lifetime(context.has_input_lifetime);
 
     quote! {
         impl #lifetime Crepe #lifetime {
-            fn new() -> Self {
-                ::core::default::Default::default()
-            }
-            #with_ctx
+            #new
             #run
         }
         #builders
     }
 }
 
-fn make_with_ctx(context: &Context) -> Option<proc_macro2::TokenStream> {
-    context.runtime_context.as_ref().map(|relation| {
-        let rel_ty = relation_type(relation, LifetimeUsage::Item);
-        quote! {
-            fn with_context(ctx: #rel_ty) -> Self {
-                Self {
-                    ctx,
-                    ..::core::default::Default::default()
+fn make_new(context: &Context) -> proc_macro2::TokenStream {
+    let fields: proc_macro2::TokenStream = context
+        .rels_input
+        .values()
+        .map(|relation| {
+            let lowercase_name = to_lowercase(&relation.name);
+            quote! {
+                #lowercase_name: ::core::default::Default::default(),
+            }
+        })
+        .collect();
+    context
+        .runtime_context
+        .as_ref()
+        .map(|relation| {
+            let rel_ty = relation_type(relation, LifetimeUsage::Item);
+            quote! {
+                fn new(ctx: #rel_ty) -> Self {
+                    Self {
+                        ctx,
+                        #fields
+                    }
                 }
             }
-        }
-    }) // have context")
+        })
+        .unwrap_or_else(|| {
+            quote! {
+                fn new() -> Self {
+                    Self {
+                        #fields
+                    }
+                }
+            }
+        }) // have context")
 }
 
 fn make_extend(context: &Context) -> proc_macro2::TokenStream {
